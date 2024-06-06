@@ -4,14 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-eyre = "0.6"
+thiserror = "1"
 futures = "0.3"
 hex = "0.4"
 http = "0.2"
 jsonwebtoken = "9.3"
+rand = "0.8"
 serde = "1"
 tower = "0.4"
-rand = "0.8"
 
 [lints.rust]
 unused_crate_dependencies = "warn"

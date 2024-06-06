@@ -1,10 +1,30 @@
 use std::task::Context;
 
-use eyre::{Result, WrapErr};
-use serde::{Deserialize, Serialize};
+use http::{
+    header::{HeaderValue, AUTHORIZATION},
+    Request, Response, StatusCode,
+};
 use rand::prelude::*;
-use http::{Request, Response, StatusCode, header::{AUTHORIZATION, HeaderValue}};
+use serde::{Deserialize, Serialize};
 use tower::Service;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("Decoding JWT from hex failed ")]
+    DecodeJwtHex(
+        #[from]
+        #[source]
+        hex::FromHexError,
+    ),
+    #[error("Decoding JWT failed expected length {JWT_SECRET_LENGTH}, but got {0}")]
+    DecodeJwtLength(usize),
+    #[error("Decoding claim failed")]
+    DecodeClaim(#[source] jsonwebtoken::errors::Error),
+    #[error("Decoding claim failed")]
+    EncodeClaim(#[source] jsonwebtoken::errors::Error),
+}
+
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Claims {
@@ -18,7 +38,10 @@ impl Claims {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("Time went backwards")
             .as_secs();
-        Self { iat, exp: iat + secs }
+        Self {
+            iat,
+            exp: iat + secs,
+        }
     }
 }
 
@@ -34,7 +57,7 @@ impl std::fmt::Display for JwtSecret {
 }
 
 impl std::str::FromStr for JwtSecret {
-    type Err = eyre::Error;
+    type Err = Error;
     fn from_str(s: &str) -> Result<Self> {
         Self::from_hex(s)
     }
@@ -52,11 +75,11 @@ impl JwtSecret {
     }
 
     pub fn from_hex(s: impl AsRef<[u8]>) -> Result<Self> {
-        let vec = hex::decode(s).context("Jwt secret hex decode")?;
+        let vec = hex::decode(s)?;
         (&*vec)
             .try_into()
             .map(Self::new)
-            .map_err(|_| eyre::eyre!("JWT secret of different length"))
+            .map_err(|_| Error::DecodeJwtLength(vec.len()))
     }
 
     pub fn decode(&self, token: &str) -> Result<Claims> {
@@ -66,7 +89,7 @@ impl JwtSecret {
             &jsonwebtoken::Validation::default(),
         )
         .map(|data| data.claims)
-        .context("Failed to decode claims")
+        .map_err(Error::DecodeClaim)
     }
 
     pub fn claim(&self) -> Result<HeaderValue> {
@@ -76,9 +99,8 @@ impl JwtSecret {
             &Claims::with_expiration(30),
             &jsonwebtoken::EncodingKey::from_secret(&self.0),
         )
-        .context("Failed to encode JWT claim")?;
-        Ok(HeaderValue::from_str(&claim)
-            .expect("Always valid header value from JWT claim"))
+        .map_err(Error::EncodeClaim)?;
+        Ok(HeaderValue::from_str(&claim).expect("Always valid header value from JWT claim"))
     }
 }
 
@@ -124,8 +146,7 @@ where
 
     fn call(&mut self, mut req: Request<B>) -> Self::Future {
         if let Ok(claim) = self.jwt.claim() {
-            req.headers_mut()
-                .insert(AUTHORIZATION, claim);
+            req.headers_mut().insert(AUTHORIZATION, claim);
         }
         futures::future::Either::Left(self.inner.call(req))
     }
