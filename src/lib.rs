@@ -1,5 +1,6 @@
 use std::task::Context;
 
+use headers::authorization::{Bearer, Credentials};
 use http::{
     header::{HeaderValue, AUTHORIZATION},
     Request, Response, StatusCode,
@@ -7,6 +8,8 @@ use http::{
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 use tower::Service;
+
+const CLAIM_EXPIRATION: u64 = 30;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -96,7 +99,7 @@ impl JwtSecret {
         let claim = jsonwebtoken::encode(
             &Default::default(),
             // Expires in 30 secs from now
-            &Claims::with_expiration(30),
+            &Claims::with_expiration(CLAIM_EXPIRATION),
             &jsonwebtoken::EncodingKey::from_secret(&self.0),
         )
         .map_err(Error::EncodeClaim)?;
@@ -184,7 +187,7 @@ where
     }
 
     fn call(&mut self, mut req: Request<ReqBody>) -> Self::Future {
-        let Some(Ok(token)) = req.headers().get(AUTHORIZATION).map(|auth| auth.to_str()) else {
+        let Some(Ok(auth_str)) = req.headers().get(AUTHORIZATION).map(|auth| auth.to_str()) else {
             let response = Response::builder()
                 .status(StatusCode::UNAUTHORIZED)
                 .body(Default::default())
@@ -192,7 +195,12 @@ where
             return futures::future::Either::Right(futures::future::ok(response));
         };
 
-        if self.jwt.decode(token).is_err() {
+        if auth_str[..Bearer::SCHEME.len()].to_lowercase() != Bearer::SCHEME.to_lowercase()
+            || self
+                .jwt
+                .decode(auth_str[Bearer::SCHEME.len()..].trim())
+                .is_err()
+        {
             let response = Response::builder()
                 .status(StatusCode::UNAUTHORIZED)
                 .body(Default::default())
@@ -204,5 +212,85 @@ where
         req.headers_mut().remove(AUTHORIZATION);
 
         futures::future::Either::Left(self.inner.call(req))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::convert::Infallible;
+
+    use http::header::AUTHORIZATION;
+    use http::StatusCode;
+
+    use tower::{Service, ServiceExt};
+    use tracing::{debug, instrument};
+
+    use crate::JwtSecret;
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn test_tower_jwt() {
+        use http::{Request, Response};
+
+        #[instrument(level = "debug")]
+        async fn handle(req: Request<&str>) -> Result<Response<&str>, Infallible> {
+            debug!("Request processing");
+
+            Ok(Response::new("success"))
+        }
+
+        let jwt_secret = rand::random::<JwtSecret>();
+
+        let mut service = tower::ServiceBuilder::new()
+            // Mark the `Authorization` request header as sensitive so it doesn't show in logs
+            .layer(
+                tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer::new(Some(
+                    hyper::header::AUTHORIZATION,
+                )),
+            )
+            .layer(crate::ServerLayer(jwt_secret))
+            .layer(tower_http::cors::CorsLayer::permissive())
+            .service_fn(handle);
+
+        let status = service
+            .ready()
+            .await
+            .unwrap()
+            .call(Request::builder().uri("/").body("").unwrap())
+            .await
+            .unwrap()
+            .status();
+
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "request did not have a token while endpoint expected one"
+        );
+
+        // client
+
+        let token = jwt_secret.claim().unwrap().to_str().unwrap().to_string();
+        let auth_head = format!("Bearer {token}",);
+
+        let status = service
+            .ready()
+            .await
+            .unwrap()
+            .call(
+                Request::builder()
+                    .uri("/")
+                    .header(AUTHORIZATION, &auth_head)
+                    .body("")
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status();
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "request should extract the token correctly"
+        );
     }
 }
