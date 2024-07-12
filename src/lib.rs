@@ -227,27 +227,26 @@ fn now() -> u64 {
 mod test {
     use std::{convert::Infallible, time::Duration};
 
-    use http::header::AUTHORIZATION;
-    use http::StatusCode;
+    use http::{header::AUTHORIZATION, Request};
+    use http::{Response, StatusCode};
 
     use tokio::time::sleep;
     use tower::{Service, ServiceExt};
+
     use tracing::{debug, instrument};
 
     use crate::{JwtSecret, CLAIM_EXPIRATION};
 
+    #[instrument(level = "debug")]
+    async fn handle(req: Request<&str>) -> Result<Response<&str>, Infallible> {
+        debug!("Request processing");
+
+        Ok(Response::new("success"))
+    }
+
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn test_tower_jwt() {
-        use http::{Request, Response};
-
-        #[instrument(level = "debug")]
-        async fn handle(req: Request<&str>) -> Result<Response<&str>, Infallible> {
-            debug!("Request processing");
-
-            Ok(Response::new("success"))
-        }
-
         let jwt_secret = rand::random::<JwtSecret>();
 
         let mut service = tower::ServiceBuilder::new()
