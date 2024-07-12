@@ -341,6 +341,7 @@ mod test {
         );
     }
 
+    // Bash: curl -X POST http://<HOST>:<IP> -i -H "authorization: Bearer <TOKEN>"
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn test_client_jwt() {
@@ -368,7 +369,14 @@ mod test {
             .unwrap()
             .start(module);
 
-        sleep(Duration::from_secs(1)).await;
+        for _ in 0..1_800 {
+            if reqwest::get(&url).await.is_ok() {
+                break;
+            }
+
+            debug!("wating server");
+            sleep(Duration::from_millis(100)).await
+        }
 
         // = = =
 
@@ -388,5 +396,30 @@ mod test {
             .request::<String, _>("hello", rpc_params![])
             .await
             .is_ok());
+
+        // = = =
+
+        let status = reqwest::get(&url).await.unwrap().status();
+
+        assert_eq!(
+            status,
+            reqwest::StatusCode::UNAUTHORIZED,
+            "The token's lifetime has expired"
+        );
+
+        let token = jwt_secret.claim().unwrap().to_str().unwrap().to_string();
+        let status = reqwest::Client::new()
+            .get(&url)
+            .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap()
+            .status();
+
+        assert_eq!(
+            status,
+            reqwest::StatusCode::METHOD_NOT_ALLOWED,
+            "request should extract the token correctly"
+        );
     }
 }
