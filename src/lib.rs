@@ -196,11 +196,14 @@ where
             return unauthorized();
         };
 
-        if auth_str[..Bearer::SCHEME.len()].to_lowercase() != Bearer::SCHEME.to_lowercase() {
+        let bearer_len = Bearer::SCHEME.len();
+        if auth_str.len() <= bearer_len
+            || auth_str[..bearer_len].to_lowercase() != Bearer::SCHEME.to_lowercase()
+        {
             return unauthorized();
         }
 
-        let token = auth_str[Bearer::SCHEME.len()..].trim();
+        let token = auth_str[bearer_len..].trim();
 
         let Ok(claim) = self.jwt.decode(token) else {
             return unauthorized();
