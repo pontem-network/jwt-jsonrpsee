@@ -1,5 +1,6 @@
 use std::task::Context;
 
+use headers::authorization::{Bearer, Credentials};
 use http::{
     header::{HeaderValue, AUTHORIZATION},
     Request, Response, StatusCode,
@@ -7,6 +8,8 @@ use http::{
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 use tower::Service;
+
+const CLAIM_EXPIRATION: u64 = 30;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -34,10 +37,7 @@ pub struct Claims {
 
 impl Claims {
     pub fn with_expiration(secs: u64) -> Self {
-        let iat = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_secs();
+        let iat = now();
         Self {
             iat,
             exp: iat + secs,
@@ -92,15 +92,19 @@ impl JwtSecret {
         .map_err(Error::DecodeClaim)
     }
 
-    pub fn claim(&self) -> Result<HeaderValue> {
+    pub fn to_bearer(&self) -> Result<HeaderValue> {
         let claim = jsonwebtoken::encode(
             &Default::default(),
             // Expires in 30 secs from now
-            &Claims::with_expiration(30),
+            &Claims::with_expiration(CLAIM_EXPIRATION),
             &jsonwebtoken::EncodingKey::from_secret(&self.0),
         )
         .map_err(Error::EncodeClaim)?;
-        Ok(HeaderValue::from_str(&claim).expect("Always valid header value from JWT claim"))
+
+        Ok(
+            HeaderValue::from_str(&format!("{} {claim}", Bearer::SCHEME))
+                .expect("Always valid header value from JWT claim"),
+        )
     }
 }
 
@@ -145,7 +149,7 @@ where
     }
 
     fn call(&mut self, mut req: Request<B>) -> Self::Future {
-        if let Ok(claim) = self.jwt.claim() {
+        if let Ok(claim) = self.jwt.to_bearer() {
             req.headers_mut().insert(AUTHORIZATION, claim);
         }
         futures::future::Either::Left(self.inner.call(req))
@@ -184,25 +188,209 @@ where
     }
 
     fn call(&mut self, mut req: Request<ReqBody>) -> Self::Future {
-        let Some(Ok(token)) = req.headers().get(AUTHORIZATION).map(|auth| auth.to_str()) else {
+        let unauthorized = || -> Self::Future {
             let response = Response::builder()
                 .status(StatusCode::UNAUTHORIZED)
                 .body(Default::default())
                 .unwrap();
-            return futures::future::Either::Right(futures::future::ok(response));
+            futures::future::Either::Right(futures::future::ok(response))
         };
 
-        if self.jwt.decode(token).is_err() {
-            let response = Response::builder()
-                .status(StatusCode::UNAUTHORIZED)
-                .body(Default::default())
-                .unwrap();
+        let Some(Ok(auth_str)) = req.headers().get(AUTHORIZATION).map(|auth| auth.to_str()) else {
+            return unauthorized();
+        };
 
-            return futures::future::Either::Right(futures::future::ok(response));
+        let bearer_len = Bearer::SCHEME.len();
+        if auth_str
+            .to_lowercase()
+            .strip_prefix(&Bearer::SCHEME.to_lowercase())
+            .is_none()
+        {
+            return unauthorized();
+        }
+
+        let token = auth_str[bearer_len..].trim();
+
+        let Ok(claim) = self.jwt.decode(token) else {
+            return unauthorized();
+        };
+
+        if claim.exp < now() {
+            return unauthorized();
         }
 
         req.headers_mut().remove(AUTHORIZATION);
 
         futures::future::Either::Left(self.inner.call(req))
+    }
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs()
+}
+
+#[cfg(test)]
+mod test {
+    use std::{convert::Infallible, time::Duration};
+
+    use http::{header::AUTHORIZATION, Request};
+    use http::{Response, StatusCode};
+
+    use jsonrpsee::core::client::ClientT;
+    use jsonrpsee::http_client::HttpClientBuilder;
+    use jsonrpsee::rpc_params;
+    use jsonrpsee::RpcModule;
+
+    use tokio::time::sleep;
+    use tower::{Service, ServiceExt};
+
+    use tracing::{debug, instrument};
+
+    use crate::{ClientLayer, JwtSecret, ServerLayer, CLAIM_EXPIRATION};
+
+    #[instrument(level = "debug")]
+    async fn handle(req: Request<&str>) -> Result<Response<&str>, Infallible> {
+        debug!("Request processing");
+
+        Ok(Response::new("success"))
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn test_tower_jwt() {
+        let jwt_secret = rand::random::<JwtSecret>();
+        let req_status = move |header: Option<http::header::HeaderValue>| {
+            let mut service = tower::ServiceBuilder::new()
+                .layer(crate::ServerLayer(jwt_secret))
+                .service_fn(handle);
+            async move {
+                let mut req = Request::builder().uri("/");
+                if let Some(header) = header {
+                    req = req.header(AUTHORIZATION, &header);
+                }
+                let req = req.body("").unwrap();
+                service
+                    .ready()
+                    .await
+                    .unwrap()
+                    .call(req)
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+
+        assert_eq!(
+            req_status(None).await,
+            StatusCode::UNAUTHORIZED,
+            "request did not have a token while endpoint expected one"
+        );
+
+        // client
+
+        let auth_header = jwt_secret.to_bearer().unwrap();
+
+        assert_eq!(
+            req_status(Some(auth_header.clone())).await,
+            StatusCode::OK,
+            "request should extract the token correctly"
+        );
+
+        sleep(Duration::from_secs(CLAIM_EXPIRATION + 2)).await;
+
+        assert_eq!(
+            req_status(Some(auth_header.clone())).await,
+            StatusCode::UNAUTHORIZED,
+            "The token's lifetime has expired"
+        );
+    }
+
+    async fn jsonrpsee(
+        addr: &str,
+        jwt_secret: JwtSecret,
+    ) -> (jsonrpsee::server::ServerHandle, impl ClientT) {
+        let service_builder = tower::ServiceBuilder::new().layer(ServerLayer(jwt_secret));
+
+        let mut module = RpcModule::new(());
+        module.register_method("hello", |_, _| "hello").unwrap();
+
+        let server = jsonrpsee::server::Server::builder()
+            .set_http_middleware(service_builder)
+            .build(addr)
+            .await
+            .unwrap()
+            .start(module);
+
+        let client = HttpClientBuilder::new()
+            .set_http_middleware(tower::ServiceBuilder::new().layer(ClientLayer(jwt_secret)))
+            .build(format!("http://{addr}"))
+            .unwrap();
+
+        (server, client)
+    }
+
+    // Bash: curl -X POST http://<HOST>:<IP> -i -H "authorization: Bearer <TOKEN>"
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn test_client_jwt() {
+        const ADDRESS: &str = "localhost:22024";
+        let url = format!("http://{ADDRESS}");
+        let jwt_secret = rand::random::<JwtSecret>();
+
+        let (_server, client) = jsonrpsee(ADDRESS, jwt_secret).await;
+
+        for _ in 0..1_800 {
+            if reqwest::get(&url).await.is_ok() {
+                break;
+            }
+
+            debug!("wating server");
+            sleep(Duration::from_millis(100)).await
+        }
+
+        assert!(HttpClientBuilder::new()
+            .build(&url)
+            .unwrap()
+            .request::<String, _>("hello", rpc_params![])
+            .await
+            .is_err());
+
+        assert!(client
+            .request::<String, _>("hello", rpc_params![])
+            .await
+            .is_ok());
+
+        // = = =
+
+        let status = reqwest::get(&url).await.unwrap().status();
+
+        assert_eq!(
+            status,
+            reqwest::StatusCode::UNAUTHORIZED,
+            "The token's lifetime has expired"
+        );
+
+        let auth_head = jwt_secret
+            .to_bearer()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let status = reqwest::Client::new()
+            .get(&url)
+            .header(reqwest::header::AUTHORIZATION, auth_head)
+            .send()
+            .await
+            .unwrap()
+            .status();
+
+        assert_eq!(
+            status,
+            reqwest::StatusCode::METHOD_NOT_ALLOWED,
+            "request should extract the token correctly"
+        );
     }
 }
