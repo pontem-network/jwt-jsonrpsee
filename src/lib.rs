@@ -262,74 +262,47 @@ mod test {
     #[tracing_test::traced_test]
     async fn test_tower_jwt() {
         let jwt_secret = rand::random::<JwtSecret>();
-        let mut service = tower::ServiceBuilder::new()
-            .layer(crate::ServerLayer(jwt_secret))
-            .service_fn(handle);
-
-        let status = service
-            .ready()
-            .await
-            .unwrap()
-            .call(Request::builder().uri("/").body("").unwrap())
-            .await
-            .unwrap()
-            .status();
+        let req_status = move |header: Option<http::header::HeaderValue>| {
+            let mut service = tower::ServiceBuilder::new()
+                .layer(crate::ServerLayer(jwt_secret))
+                .service_fn(handle);
+            async move {
+                let mut req = Request::builder().uri("/");
+                if let Some(header) = header {
+                    req = req.header(AUTHORIZATION, &header);
+                }
+                let req = req.body("").unwrap();
+                service
+                    .ready()
+                    .await
+                    .unwrap()
+                    .call(req)
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
 
         assert_eq!(
-            status,
+            req_status(None).await,
             StatusCode::UNAUTHORIZED,
             "request did not have a token while endpoint expected one"
         );
 
         // client
 
-        let auth_header = jwt_secret
-            .to_bearer()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string();
-
-        let status = service
-            .ready()
-            .await
-            .unwrap()
-            .call(
-                Request::builder()
-                    .uri("/")
-                    .header(AUTHORIZATION, &auth_header)
-                    .body("")
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
-            .status();
+        let auth_header = jwt_secret.to_bearer().unwrap();
 
         assert_eq!(
-            status,
+            req_status(Some(auth_header.clone())).await,
             StatusCode::OK,
             "request should extract the token correctly"
         );
 
         sleep(Duration::from_secs(CLAIM_EXPIRATION + 2)).await;
 
-        let status = service
-            .ready()
-            .await
-            .unwrap()
-            .call(
-                Request::builder()
-                    .uri("/")
-                    .header(AUTHORIZATION, &auth_header)
-                    .body("")
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
-            .status();
-
         assert_eq!(
-            status,
+            req_status(Some(auth_header.clone())).await,
             StatusCode::UNAUTHORIZED,
             "The token's lifetime has expired"
         );
@@ -353,7 +326,7 @@ mod test {
 
         let client = HttpClientBuilder::new()
             .set_http_middleware(tower::ServiceBuilder::new().layer(ClientLayer(jwt_secret)))
-            .build(&format!("http://{addr}"))
+            .build(format!("http://{addr}"))
             .unwrap();
 
         (server, client)
