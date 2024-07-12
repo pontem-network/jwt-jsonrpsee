@@ -37,10 +37,7 @@ pub struct Claims {
 
 impl Claims {
     pub fn with_expiration(secs: u64) -> Self {
-        let iat = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_secs();
+        let iat = now();
         Self {
             iat,
             exp: iat + secs,
@@ -187,26 +184,30 @@ where
     }
 
     fn call(&mut self, mut req: Request<ReqBody>) -> Self::Future {
-        let Some(Ok(auth_str)) = req.headers().get(AUTHORIZATION).map(|auth| auth.to_str()) else {
+        let unauthorized = || -> Self::Future {
             let response = Response::builder()
                 .status(StatusCode::UNAUTHORIZED)
                 .body(Default::default())
                 .unwrap();
-            return futures::future::Either::Right(futures::future::ok(response));
+            futures::future::Either::Right(futures::future::ok(response))
         };
 
-        if auth_str[..Bearer::SCHEME.len()].to_lowercase() != Bearer::SCHEME.to_lowercase()
-            || self
-                .jwt
-                .decode(auth_str[Bearer::SCHEME.len()..].trim())
-                .is_err()
-        {
-            let response = Response::builder()
-                .status(StatusCode::UNAUTHORIZED)
-                .body(Default::default())
-                .unwrap();
+        let Some(Ok(auth_str)) = req.headers().get(AUTHORIZATION).map(|auth| auth.to_str()) else {
+            return unauthorized();
+        };
 
-            return futures::future::Either::Right(futures::future::ok(response));
+        if auth_str[..Bearer::SCHEME.len()].to_lowercase() != Bearer::SCHEME.to_lowercase() {
+            return unauthorized();
+        }
+
+        let token = auth_str[Bearer::SCHEME.len()..].trim();
+
+        let Ok(claim) = self.jwt.decode(token) else {
+            return unauthorized();
+        };
+
+        if claim.exp < now() {
+            return unauthorized();
         }
 
         req.headers_mut().remove(AUTHORIZATION);
@@ -215,17 +216,25 @@ where
     }
 }
 
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs()
+}
+
 #[cfg(test)]
 mod test {
-    use std::convert::Infallible;
+    use std::{convert::Infallible, time::Duration};
 
     use http::header::AUTHORIZATION;
     use http::StatusCode;
 
+    use tokio::time::sleep;
     use tower::{Service, ServiceExt};
     use tracing::{debug, instrument};
 
-    use crate::JwtSecret;
+    use crate::{JwtSecret, CLAIM_EXPIRATION};
 
     #[tokio::test]
     #[tracing_test::traced_test]
@@ -291,6 +300,29 @@ mod test {
             status,
             StatusCode::OK,
             "request should extract the token correctly"
+        );
+
+        sleep(Duration::from_secs(CLAIM_EXPIRATION + 2)).await;
+
+        let status = service
+            .ready()
+            .await
+            .unwrap()
+            .call(
+                Request::builder()
+                    .uri("/")
+                    .header(AUTHORIZATION, &auth_head)
+                    .body("")
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status();
+
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "The token's lifetime has expired"
         );
     }
 }
