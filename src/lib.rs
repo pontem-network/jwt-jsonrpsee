@@ -205,8 +205,10 @@ where
         };
 
         let bearer_len = Bearer::SCHEME.len();
-        if auth_str.len() <= bearer_len
-            || auth_str[..bearer_len].to_lowercase() != Bearer::SCHEME.to_lowercase()
+        if auth_str
+            .to_lowercase()
+            .strip_prefix(&Bearer::SCHEME.to_lowercase())
+            .is_none()
         {
             return unauthorized();
         }
@@ -348,6 +350,8 @@ mod test {
         const ADDRESS: &str = "localhost:22024";
         let url = format!("http://{ADDRESS}");
         let jwt_secret = rand::random::<JwtSecret>();
+
+        dbg!(&jwt_secret.claim().unwrap().to_str());
 
         let service_builder = tower::ServiceBuilder::new()
             // Mark the `Authorization` request header as sensitive so it doesn't show in logs
