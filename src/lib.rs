@@ -262,16 +262,8 @@ mod test {
     #[tracing_test::traced_test]
     async fn test_tower_jwt() {
         let jwt_secret = rand::random::<JwtSecret>();
-
         let mut service = tower::ServiceBuilder::new()
-            // Mark the `Authorization` request header as sensitive so it doesn't show in logs
-            .layer(
-                tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer::new(Some(
-                    hyper::header::AUTHORIZATION,
-                )),
-            )
             .layer(crate::ServerLayer(jwt_secret))
-            .layer(tower_http::cors::CorsLayer::permissive())
             .service_fn(handle);
 
         let status = service
@@ -297,6 +289,7 @@ mod test {
             .to_str()
             .unwrap()
             .to_string();
+
         let status = service
             .ready()
             .await
@@ -342,6 +335,30 @@ mod test {
         );
     }
 
+    async fn jsonrpsee(
+        addr: &str,
+        jwt_secret: JwtSecret,
+    ) -> (jsonrpsee::server::ServerHandle, impl ClientT) {
+        let service_builder = tower::ServiceBuilder::new().layer(ServerLayer(jwt_secret));
+
+        let mut module = RpcModule::new(());
+        module.register_method("hello", |_, _| "hello").unwrap();
+
+        let server = jsonrpsee::server::Server::builder()
+            .set_http_middleware(service_builder)
+            .build(addr)
+            .await
+            .unwrap()
+            .start(module);
+
+        let client = HttpClientBuilder::new()
+            .set_http_middleware(tower::ServiceBuilder::new().layer(ClientLayer(jwt_secret)))
+            .build(&format!("http://{addr}"))
+            .unwrap();
+
+        (server, client)
+    }
+
     // Bash: curl -X POST http://<HOST>:<IP> -i -H "authorization: Bearer <TOKEN>"
     #[tokio::test]
     #[tracing_test::traced_test]
@@ -350,25 +367,7 @@ mod test {
         let url = format!("http://{ADDRESS}");
         let jwt_secret = rand::random::<JwtSecret>();
 
-        let service_builder = tower::ServiceBuilder::new()
-            // Mark the `Authorization` request header as sensitive so it doesn't show in logs
-            .layer(
-                tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer::new(Some(
-                    hyper::header::AUTHORIZATION,
-                )),
-            )
-            .layer(ServerLayer(jwt_secret))
-            .layer(tower_http::cors::CorsLayer::permissive());
-
-        let mut module = RpcModule::new(());
-        module.register_method("hello", |_, _| "hello").unwrap();
-
-        let _server = jsonrpsee::server::Server::builder()
-            .set_http_middleware(service_builder)
-            .build(ADDRESS)
-            .await
-            .unwrap()
-            .start(module);
+        let (_server, client) = jsonrpsee(ADDRESS, jwt_secret).await;
 
         for _ in 0..1_800 {
             if reqwest::get(&url).await.is_ok() {
@@ -379,20 +378,13 @@ mod test {
             sleep(Duration::from_millis(100)).await
         }
 
-        // = = =
-
-        let client = HttpClientBuilder::new().build(&url).unwrap();
-        assert!(client
+        assert!(HttpClientBuilder::new()
+            .build(&url)
+            .unwrap()
             .request::<String, _>("hello", rpc_params![])
             .await
             .is_err());
 
-        let auth_client = tower::ServiceBuilder::new().layer(ClientLayer(jwt_secret));
-
-        let client = HttpClientBuilder::new()
-            .set_http_middleware(auth_client)
-            .build(&url)
-            .unwrap();
         assert!(client
             .request::<String, _>("hello", rpc_params![])
             .await

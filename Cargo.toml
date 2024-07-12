@@ -15,12 +15,10 @@ thiserror = "1"
 tower = "0.4"
 
 [dev-dependencies]
-hyper = "0.14.29"
 jsonrpsee = {version = "0.22.5", features = ["server", "http-client", "macros"]}
 reqwest = "0.12.5"
 tokio = {version = "1.38.0", features = ["rt", "macros"]}
 tower = {version = "0.4.13", features = ["full"]}
-tower-http = {version = "0.4.0", features = ["full"]}
 tracing = "0.1.40"
 tracing-test = "0.2.5"
 
