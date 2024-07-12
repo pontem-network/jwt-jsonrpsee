@@ -92,7 +92,7 @@ impl JwtSecret {
         .map_err(Error::DecodeClaim)
     }
 
-    pub fn try_header_value(&self) -> Result<HeaderValue> {
+    pub fn to_bearer(&self) -> Result<HeaderValue> {
         let claim = jsonwebtoken::encode(
             &Default::default(),
             // Expires in 30 secs from now
@@ -149,7 +149,7 @@ where
     }
 
     fn call(&mut self, mut req: Request<B>) -> Self::Future {
-        if let Ok(claim) = self.jwt.try_header_value() {
+        if let Ok(claim) = self.jwt.to_bearer() {
             req.headers_mut().insert(AUTHORIZATION, claim);
         }
         futures::future::Either::Left(self.inner.call(req))
@@ -284,7 +284,7 @@ mod test {
         // client
 
         let auth_header = jwt_secret
-            .try_header_value()
+            .to_bearer()
             .unwrap()
             .to_str()
             .unwrap()
@@ -401,7 +401,7 @@ mod test {
         );
 
         let auth_head = jwt_secret
-            .try_header_value()
+            .to_bearer()
             .unwrap()
             .to_str()
             .unwrap()
