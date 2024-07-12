@@ -146,7 +146,15 @@ where
 
     fn call(&mut self, mut req: Request<B>) -> Self::Future {
         if let Ok(claim) = self.jwt.claim() {
-            req.headers_mut().insert(AUTHORIZATION, claim);
+            let auth_bytes = format!("{} ", Bearer::SCHEME)
+                .as_bytes()
+                .iter()
+                .chain(claim.as_bytes())
+                .cloned()
+                .collect::<Vec<_>>();
+            let auth_head = HeaderValue::from_bytes(&auth_bytes).expect("An unexpected error.");
+
+            req.headers_mut().insert(AUTHORIZATION, auth_head);
         }
         futures::future::Either::Left(self.inner.call(req))
     }
@@ -233,12 +241,17 @@ mod test {
     use http::{header::AUTHORIZATION, Request};
     use http::{Response, StatusCode};
 
+    use jsonrpsee::core::client::ClientT;
+    use jsonrpsee::http_client::HttpClientBuilder;
+    use jsonrpsee::rpc_params;
+    use jsonrpsee::RpcModule;
+
     use tokio::time::sleep;
     use tower::{Service, ServiceExt};
 
     use tracing::{debug, instrument};
 
-    use crate::{JwtSecret, CLAIM_EXPIRATION};
+    use crate::{ClientLayer, JwtSecret, ServerLayer, CLAIM_EXPIRATION};
 
     #[instrument(level = "debug")]
     async fn handle(req: Request<&str>) -> Result<Response<&str>, Infallible> {
@@ -326,5 +339,54 @@ mod test {
             StatusCode::UNAUTHORIZED,
             "The token's lifetime has expired"
         );
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn test_client_jwt() {
+        const ADDRESS: &str = "localhost:22024";
+        let url = format!("http://{ADDRESS}");
+        let jwt_secret = rand::random::<JwtSecret>();
+
+        let service_builder = tower::ServiceBuilder::new()
+            // Mark the `Authorization` request header as sensitive so it doesn't show in logs
+            .layer(
+                tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer::new(Some(
+                    hyper::header::AUTHORIZATION,
+                )),
+            )
+            .layer(ServerLayer(jwt_secret))
+            .layer(tower_http::cors::CorsLayer::permissive());
+
+        let mut module = RpcModule::new(());
+        module.register_method("hello", |_, _| "hello").unwrap();
+
+        let _server = jsonrpsee::server::Server::builder()
+            .set_http_middleware(service_builder)
+            .build(ADDRESS)
+            .await
+            .unwrap()
+            .start(module);
+
+        sleep(Duration::from_secs(1)).await;
+
+        // = = =
+
+        let client = HttpClientBuilder::new().build(&url).unwrap();
+        assert!(client
+            .request::<String, _>("hello", rpc_params![])
+            .await
+            .is_err());
+
+        let auth_client = tower::ServiceBuilder::new().layer(ClientLayer(jwt_secret));
+
+        let client = HttpClientBuilder::new()
+            .set_http_middleware(auth_client)
+            .build(&url)
+            .unwrap();
+        assert!(client
+            .request::<String, _>("hello", rpc_params![])
+            .await
+            .is_ok());
     }
 }
