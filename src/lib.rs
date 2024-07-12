@@ -100,7 +100,11 @@ impl JwtSecret {
             &jsonwebtoken::EncodingKey::from_secret(&self.0),
         )
         .map_err(Error::EncodeClaim)?;
-        Ok(HeaderValue::from_str(&claim).expect("Always valid header value from JWT claim"))
+
+        Ok(
+            HeaderValue::from_str(&format!("{} {claim}", Bearer::SCHEME))
+                .expect("Always valid header value from JWT claim"),
+        )
     }
 }
 
@@ -146,15 +150,7 @@ where
 
     fn call(&mut self, mut req: Request<B>) -> Self::Future {
         if let Ok(claim) = self.jwt.claim() {
-            let auth_bytes = format!("{} ", Bearer::SCHEME)
-                .as_bytes()
-                .iter()
-                .chain(claim.as_bytes())
-                .cloned()
-                .collect::<Vec<_>>();
-            let auth_head = HeaderValue::from_bytes(&auth_bytes).expect("An unexpected error.");
-
-            req.headers_mut().insert(AUTHORIZATION, auth_head);
+            req.headers_mut().insert(AUTHORIZATION, claim);
         }
         futures::future::Either::Left(self.inner.call(req))
     }
@@ -295,9 +291,7 @@ mod test {
 
         // client
 
-        let token = jwt_secret.claim().unwrap().to_str().unwrap().to_string();
-        let auth_head = format!("Bearer {token}",);
-
+        let auth_header = jwt_secret.claim().unwrap().to_str().unwrap().to_string();
         let status = service
             .ready()
             .await
@@ -305,7 +299,7 @@ mod test {
             .call(
                 Request::builder()
                     .uri("/")
-                    .header(AUTHORIZATION, &auth_head)
+                    .header(AUTHORIZATION, &auth_header)
                     .body("")
                     .unwrap(),
             )
@@ -328,7 +322,7 @@ mod test {
             .call(
                 Request::builder()
                     .uri("/")
-                    .header(AUTHORIZATION, &auth_head)
+                    .header(AUTHORIZATION, &auth_header)
                     .body("")
                     .unwrap(),
             )
@@ -350,8 +344,6 @@ mod test {
         const ADDRESS: &str = "localhost:22024";
         let url = format!("http://{ADDRESS}");
         let jwt_secret = rand::random::<JwtSecret>();
-
-        dbg!(&jwt_secret.claim().unwrap().to_str());
 
         let service_builder = tower::ServiceBuilder::new()
             // Mark the `Authorization` request header as sensitive so it doesn't show in logs
@@ -411,10 +403,10 @@ mod test {
             "The token's lifetime has expired"
         );
 
-        let token = jwt_secret.claim().unwrap().to_str().unwrap().to_string();
+        let auth_head = jwt_secret.claim().unwrap().to_str().unwrap().to_string();
         let status = reqwest::Client::new()
             .get(&url)
-            .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(reqwest::header::AUTHORIZATION, auth_head)
             .send()
             .await
             .unwrap()
