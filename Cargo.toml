@@ -7,7 +7,7 @@ version = "0.1.1"
 futures = "0.3"
 headers = "0.4.0"
 hex = "0.4"
-http = "0.2"
+http = "1"
 jsonwebtoken = "9.3"
 rand = "0.8"
 serde = "1"
@@ -15,10 +15,10 @@ thiserror = "1"
 tower = "0.4"
 
 [dev-dependencies]
-jsonrpsee = {version = "0.22.5", features = ["server", "http-client", "macros"]}
+jsonrpsee = { version = "0.24", features = ["server", "http-client", "macros"] }
 reqwest = "0.12.5"
-tokio = {version = "1.38.0", features = ["rt", "macros"]}
-tower = {version = "0.4.13", features = ["full"]}
+tokio = { version = "1.38.0", features = ["test-util"] }
+tower = { version = "*", features = ["full"] }
 tracing = "0.1.40"
 tracing-test = "0.2.5"
 

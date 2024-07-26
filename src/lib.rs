@@ -156,6 +156,7 @@ where
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 pub struct ServerLayer(pub JwtSecret);
 
 impl<S> tower::Layer<S> for ServerLayer {
@@ -166,6 +167,7 @@ impl<S> tower::Layer<S> for ServerLayer {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 pub struct ServerAuth<S> {
     inner: S,
     jwt: JwtSecret,
@@ -315,7 +317,7 @@ mod test {
         let service_builder = tower::ServiceBuilder::new().layer(ServerLayer(jwt_secret));
 
         let mut module = RpcModule::new(());
-        module.register_method("hello", |_, _| "hello").unwrap();
+        module.register_method("hello", |_, _, _| "hello").unwrap();
 
         let server = jsonrpsee::server::Server::builder()
             .set_http_middleware(service_builder)
