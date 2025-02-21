@@ -47,7 +47,7 @@ impl Claims {
 
 pub const JWT_SECRET_LENGTH: usize = 32;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct JwtSecret([u8; JWT_SECRET_LENGTH]);
 
 impl std::fmt::Display for JwtSecret {
