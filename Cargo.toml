@@ -17,6 +17,7 @@ tower = "0.4"
 [dev-dependencies]
 jsonrpsee = {version = "0.24", features = ["server", "http-client", "macros"]}
 reqwest = "0.12.5"
+serde_json = "1.0.139"
 tokio = {version = "1.38.0", features = ["test-util"]}
 tower = {version = "*", features = ["full"]}
 tracing = "0.1.40"

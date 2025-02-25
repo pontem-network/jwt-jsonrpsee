@@ -1,4 +1,4 @@
-use std::task::Context;
+use std::{fmt, str::FromStr, task::Context};
 
 use headers::authorization::{Bearer, Credentials};
 use http::{
@@ -6,7 +6,10 @@ use http::{
     Request, Response, StatusCode,
 };
 use rand::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{self, Visitor},
+    Deserialize, Serialize,
+};
 use tower::Service;
 
 const CLAIM_EXPIRATION: u64 = 30;
@@ -47,8 +50,48 @@ impl Claims {
 
 pub const JWT_SECRET_LENGTH: usize = 32;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JwtSecret([u8; JWT_SECRET_LENGTH]);
+
+impl Serialize for JwtSecret {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for JwtSecret {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct JwtVisitor;
+
+        impl Visitor<'_> for JwtVisitor {
+            type Value = JwtSecret;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("JWT in hex format")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<JwtSecret, E>
+            where
+                E: de::Error,
+            {
+                JwtSecret::from_str(value).map_err(|err| {
+                    E::invalid_value(
+                        de::Unexpected::Str(value),
+                        &format!("invalid JWT. {err}").as_str(),
+                    )
+                })
+            }
+        }
+
+        deserializer.deserialize_str(JwtVisitor)
+    }
+}
 
 impl std::fmt::Display for JwtSecret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -246,6 +289,7 @@ mod test {
     use jsonrpsee::rpc_params;
     use jsonrpsee::RpcModule;
 
+    use rand::random;
     use tokio::time::sleep;
     use tower::{Service, ServiceExt};
 
@@ -258,6 +302,19 @@ mod test {
         debug!("Request processing");
 
         Ok(Response::new("success"))
+    }
+
+    #[test]
+    fn test_serialize() {
+        let jwt: JwtSecret = random();
+        assert_eq!(
+            format!("{:?}", jwt.to_string()),
+            serde_json::to_string(&jwt).unwrap()
+        );
+        assert_eq!(
+            jwt,
+            serde_json::from_str::<JwtSecret>(&format!("{:?}", jwt.to_string())).unwrap()
+        );
     }
 
     #[tokio::test]
