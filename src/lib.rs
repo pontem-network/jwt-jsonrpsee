@@ -1,5 +1,6 @@
 use std::{fmt, str::FromStr, task::Context};
 
+use chrono::Utc;
 use headers::authorization::{Bearer, Credentials};
 use http::{
     header::{HeaderValue, AUTHORIZATION},
@@ -26,13 +27,15 @@ pub enum Error {
     DecodeJwtLength(usize),
     #[error("Decoding claim failed")]
     DecodeClaim(#[source] jsonwebtoken::errors::Error),
+    #[error("Decoding Value failed")]
+    Encode(#[source] jsonwebtoken::errors::Error),
     #[error("Decoding claim failed")]
     EncodeClaim(#[source] jsonwebtoken::errors::Error),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Claims {
     exp: u64,
     iat: u64,
@@ -45,6 +48,11 @@ impl Claims {
             iat,
             exp: iat + secs,
         }
+    }
+
+    pub fn check(&self) -> bool {
+        let now = now();
+        self.iat <= now && self.exp >= now
     }
 }
 
@@ -125,6 +133,16 @@ impl JwtSecret {
             .map_err(|_| Error::DecodeJwtLength(vec.len()))
     }
 
+    pub fn encode<T: Serialize>(&self, data: &T) -> Result<String> {
+        jsonwebtoken::encode(
+            &Default::default(),
+            // Expires in 30 secs from now
+            data,
+            &jsonwebtoken::EncodingKey::from_secret(&self.0),
+        )
+        .map_err(Error::Encode)
+    }
+
     pub fn decode(&self, token: &str) -> Result<Claims> {
         jsonwebtoken::decode::<Claims>(
             token,
@@ -136,13 +154,7 @@ impl JwtSecret {
     }
 
     pub fn to_bearer(&self) -> Result<String> {
-        jsonwebtoken::encode(
-            &Default::default(),
-            // Expires in 30 secs from now
-            &Claims::with_expiration(CLAIM_EXPIRATION),
-            &jsonwebtoken::EncodingKey::from_secret(&self.0),
-        )
-        .map_err(Error::EncodeClaim)
+        self.encode(&Claims::with_expiration(CLAIM_EXPIRATION))
     }
 
     pub fn to_bearer_header(&self) -> Result<HeaderValue> {
@@ -260,13 +272,14 @@ where
 
         let token = auth_str[bearer_len..].trim();
 
-        let Ok(claim) = self.jwt.decode(token) else {
+        if !self
+            .jwt
+            .decode(token)
+            .map(|claim| claim.check())
+            .unwrap_or_default()
+        {
             return unauthorized();
         };
-
-        if claim.exp < now() {
-            return unauthorized();
-        }
 
         req.headers_mut().remove(AUTHORIZATION);
 
@@ -275,10 +288,7 @@ where
 }
 
 fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs()
+    Utc::now().timestamp() as u64
 }
 
 #[cfg(test)]
@@ -299,7 +309,7 @@ mod test {
 
     use tracing::{debug, instrument};
 
-    use crate::{ClientLayer, JwtSecret, ServerLayer, CLAIM_EXPIRATION};
+    use crate::{Claims, ClientLayer, JwtSecret, ServerLayer, CLAIM_EXPIRATION};
 
     #[instrument(level = "debug")]
     async fn handle(req: Request<&str>) -> Result<Response<&str>, Infallible> {
@@ -321,6 +331,16 @@ mod test {
         );
     }
 
+    #[test]
+    #[tracing_test::traced_test]
+    fn test_enc_dec() {
+        let jwt_secret = rand::random::<JwtSecret>();
+
+        let claim = Claims::with_expiration(CLAIM_EXPIRATION);
+        let claim_str = jwt_secret.encode(&claim).unwrap();
+        assert_eq!(claim, jwt_secret.decode(&claim_str).unwrap());
+    }
+
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn test_tower_jwt() {
@@ -331,9 +351,11 @@ mod test {
                 .service_fn(handle);
             async move {
                 let mut req = Request::builder().uri("/");
+
                 if let Some(header) = header {
                     req = req.header(AUTHORIZATION, &header);
                 }
+
                 let req = req.body("").unwrap();
                 service
                     .ready()
