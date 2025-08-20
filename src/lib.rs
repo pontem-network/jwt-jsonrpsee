@@ -5,7 +5,7 @@ use http::{
     header::{HeaderValue, AUTHORIZATION},
     Request, Response, StatusCode,
 };
-use rand::prelude::*;
+use rand::{distr::StandardUniform, prelude::*};
 use serde::{
     de::{self, Visitor},
     Deserialize, Serialize,
@@ -106,9 +106,9 @@ impl std::str::FromStr for JwtSecret {
     }
 }
 
-impl rand::distributions::Distribution<JwtSecret> for rand::distributions::Standard {
+impl Distribution<JwtSecret> for StandardUniform {
     fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> JwtSecret {
-        JwtSecret::new(rng.gen())
+        JwtSecret::new(rng.random())
     }
 }
 
@@ -135,14 +135,18 @@ impl JwtSecret {
         .map_err(Error::DecodeClaim)
     }
 
-    pub fn to_bearer(&self) -> Result<HeaderValue> {
-        let claim = jsonwebtoken::encode(
+    pub fn to_bearer(&self) -> Result<String> {
+        jsonwebtoken::encode(
             &Default::default(),
             // Expires in 30 secs from now
             &Claims::with_expiration(CLAIM_EXPIRATION),
             &jsonwebtoken::EncodingKey::from_secret(&self.0),
         )
-        .map_err(Error::EncodeClaim)?;
+        .map_err(Error::EncodeClaim)
+    }
+
+    pub fn to_bearer_header(&self) -> Result<HeaderValue> {
+        let claim = self.to_bearer()?;
 
         Ok(
             HeaderValue::from_str(&format!("{} {claim}", Bearer::SCHEME))
@@ -192,7 +196,7 @@ where
     }
 
     fn call(&mut self, mut req: Request<B>) -> Self::Future {
-        if let Ok(claim) = self.jwt.to_bearer() {
+        if let Ok(claim) = self.jwt.to_bearer_header() {
             req.headers_mut().insert(AUTHORIZATION, claim);
         }
         futures::future::Either::Left(self.inner.call(req))
@@ -350,7 +354,7 @@ mod test {
 
         // client
 
-        let auth_header = jwt_secret.to_bearer().unwrap();
+        let auth_header = jwt_secret.to_bearer_header().unwrap();
 
         assert_eq!(
             req_status(Some(auth_header.clone())).await,
@@ -433,7 +437,7 @@ mod test {
         );
 
         let auth_head = jwt_secret
-            .to_bearer()
+            .to_bearer_header()
             .unwrap()
             .to_str()
             .unwrap()
